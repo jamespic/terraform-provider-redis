@@ -10,8 +10,6 @@ description: |-
 
 Manages a Redis string key-value pair (`SET`).
 
-Changing `key` destroys and recreates the resource. The value can be updated in-place.
-
 ## Example Usage
 
 ```terraform
@@ -35,9 +33,10 @@ resource "redis_string" "example" {
 
 ## Import
 
-Any existing Redis string key can be imported using the key name:
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
 
 ```shell
 terraform import redis_string.example "app:version"
 ```
-

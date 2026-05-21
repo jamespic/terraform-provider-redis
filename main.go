@@ -9,7 +9,7 @@ import (
 	"log"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
-	"github.com/hashicorp/terraform-provider-scaffolding-framework/internal/provider"
+	"github.com/jamespic/redis-terraform-provider/internal/provider"
 )
 
 var (
@@ -28,7 +28,7 @@ func main() {
 	flag.Parse()
 
 	opts := providerserver.ServeOpts{
-		Address: "registry.terraform.io/hashicorp/redis",
+		Address: "registry.terraform.io/jamespic/redis",
 		Debug:   debug,
 	}
 

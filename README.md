@@ -24,7 +24,7 @@ All resources support `terraform import` using the Redis key as the import ID.
 terraform {
   required_providers {
     redis = {
-      source = "hashicorp/redis"
+      source = "jamespic/redis"
     }
   }
 }
