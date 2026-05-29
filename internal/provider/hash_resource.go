@@ -13,7 +13,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/redis/go-redis/v9"
 )
 
 var _ resource.Resource = &HashResource{}
@@ -26,14 +25,15 @@ func NewHashResource() resource.Resource {
 
 // HashResource manages a Redis hash.
 type HashResource struct {
-	client *redis.Client
+	providerCfg *providerConfig
 }
 
 // HashResourceModel describes the resource data model.
 type HashResourceModel struct {
-	Key    types.String `tfsdk:"key"`
-	Fields types.Map    `tfsdk:"fields"`
-	ID     types.String `tfsdk:"id"`
+	Key        types.String             `tfsdk:"key"`
+	Fields     types.Map                `tfsdk:"fields"`
+	ID         types.String             `tfsdk:"id"`
+	Connection *ConnectionOverrideModel `tfsdk:"redis_connection"`
 }
 
 func (r *HashResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -63,6 +63,7 @@ func (r *HashResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
+			"redis_connection": connectionBlock(),
 		},
 	}
 }
@@ -71,15 +72,15 @@ func (r *HashResource) Configure(_ context.Context, req resource.ConfigureReques
 	if req.ProviderData == nil {
 		return
 	}
-	client, ok := req.ProviderData.(*redis.Client)
+	cfg, ok := req.ProviderData.(*providerConfig)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *redis.Client, got: %T. Please report this issue to the provider developers.", req.ProviderData),
+			fmt.Sprintf("Expected *providerConfig, got: %T. Please report this issue to the provider developers.", req.ProviderData),
 		)
 		return
 	}
-	r.client = client
+	r.providerCfg = cfg
 }
 
 func (r *HashResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -100,8 +101,11 @@ func (r *HashResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
+	client := r.providerCfg.clientFor(data.Connection)
+	defer client.Close()
+
 	// DEL first so that pre-existing fields in the key do not bleed into Terraform state.
-	if err := r.client.Del(ctx, data.Key.ValueString()).Err(); err != nil {
+	if err := client.Del(ctx, data.Key.ValueString()).Err(); err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to DEL key %q before creating hash: %s", data.Key.ValueString(), err))
 		return
 	}
@@ -111,7 +115,7 @@ func (r *HashResource) Create(ctx context.Context, req resource.CreateRequest, r
 		args = append(args, k, v)
 	}
 
-	if err := r.client.HSet(ctx, data.Key.ValueString(), args...).Err(); err != nil {
+	if err := client.HSet(ctx, data.Key.ValueString(), args...).Err(); err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to HSET key %q: %s", data.Key.ValueString(), err))
 		return
 	}
@@ -127,7 +131,10 @@ func (r *HashResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		return
 	}
 
-	result, err := r.client.HGetAll(ctx, data.Key.ValueString()).Result()
+	client := r.providerCfg.clientFor(data.Connection)
+	defer client.Close()
+
+	result, err := client.HGetAll(ctx, data.Key.ValueString()).Result()
 	if err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to HGETALL key %q: %s", data.Key.ValueString(), err))
 		return
@@ -167,6 +174,9 @@ func (r *HashResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
+	client := r.providerCfg.clientFor(plan.Connection)
+	defer client.Close()
+
 	// Remove fields that are no longer present in the plan.
 	var toDelete []string
 	for k := range stateFields {
@@ -175,7 +185,7 @@ func (r *HashResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		}
 	}
 	if len(toDelete) > 0 {
-		if err := r.client.HDel(ctx, plan.Key.ValueString(), toDelete...).Err(); err != nil {
+		if err := client.HDel(ctx, plan.Key.ValueString(), toDelete...).Err(); err != nil {
 			resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to HDEL fields from key %q: %s", plan.Key.ValueString(), err))
 			return
 		}
@@ -187,7 +197,7 @@ func (r *HashResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		args = append(args, k, v)
 	}
 	if len(args) > 0 {
-		if err := r.client.HSet(ctx, plan.Key.ValueString(), args...).Err(); err != nil {
+		if err := client.HSet(ctx, plan.Key.ValueString(), args...).Err(); err != nil {
 			resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to HSET key %q: %s", plan.Key.ValueString(), err))
 			return
 		}
@@ -204,14 +214,21 @@ func (r *HashResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 		return
 	}
 
-	if err := r.client.Del(ctx, data.Key.ValueString()).Err(); err != nil {
+	client := r.providerCfg.clientFor(data.Connection)
+	defer client.Close()
+
+	if err := client.Del(ctx, data.Key.ValueString()).Err(); err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to DEL key %q: %s", data.Key.ValueString(), err))
 	}
 }
 
 func (r *HashResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	key := req.ID
-	result, err := r.client.HGetAll(ctx, key).Result()
+
+	client := r.providerCfg.clientFor(nil)
+	defer client.Close()
+
+	result, err := client.HGetAll(ctx, key).Result()
 	if err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to HGETALL key %q: %s", key, err))
 		return

@@ -13,7 +13,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/redis/go-redis/v9"
 )
 
 var _ resource.Resource = &SetResource{}
@@ -26,14 +25,15 @@ func NewSetResource() resource.Resource {
 
 // SetResource manages a Redis set.
 type SetResource struct {
-	client *redis.Client
+	providerCfg *providerConfig
 }
 
 // SetResourceModel describes the resource data model.
 type SetResourceModel struct {
-	Key     types.String `tfsdk:"key"`
-	Members types.Set    `tfsdk:"members"`
-	ID      types.String `tfsdk:"id"`
+	Key        types.String             `tfsdk:"key"`
+	Members    types.Set                `tfsdk:"members"`
+	ID         types.String             `tfsdk:"id"`
+	Connection *ConnectionOverrideModel `tfsdk:"redis_connection"`
 }
 
 func (r *SetResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -63,6 +63,7 @@ func (r *SetResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
+			"redis_connection": connectionBlock(),
 		},
 	}
 }
@@ -71,15 +72,15 @@ func (r *SetResource) Configure(_ context.Context, req resource.ConfigureRequest
 	if req.ProviderData == nil {
 		return
 	}
-	client, ok := req.ProviderData.(*redis.Client)
+	cfg, ok := req.ProviderData.(*providerConfig)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *redis.Client, got: %T. Please report this issue to the provider developers.", req.ProviderData),
+			fmt.Sprintf("Expected *providerConfig, got: %T. Please report this issue to the provider developers.", req.ProviderData),
 		)
 		return
 	}
-	r.client = client
+	r.providerCfg = cfg
 }
 
 func (r *SetResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -100,8 +101,11 @@ func (r *SetResource) Create(ctx context.Context, req resource.CreateRequest, re
 		return
 	}
 
+	client := r.providerCfg.clientFor(data.Connection)
+	defer client.Close()
+
 	// DEL first so that pre-existing members in the key do not bleed into Terraform state.
-	if err := r.client.Del(ctx, data.Key.ValueString()).Err(); err != nil {
+	if err := client.Del(ctx, data.Key.ValueString()).Err(); err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to DEL key %q before creating set: %s", data.Key.ValueString(), err))
 		return
 	}
@@ -111,7 +115,7 @@ func (r *SetResource) Create(ctx context.Context, req resource.CreateRequest, re
 		args[i] = m
 	}
 
-	if err := r.client.SAdd(ctx, data.Key.ValueString(), args...).Err(); err != nil {
+	if err := client.SAdd(ctx, data.Key.ValueString(), args...).Err(); err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to SADD key %q: %s", data.Key.ValueString(), err))
 		return
 	}
@@ -127,7 +131,10 @@ func (r *SetResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 		return
 	}
 
-	result, err := r.client.SMembers(ctx, data.Key.ValueString()).Result()
+	client := r.providerCfg.clientFor(data.Connection)
+	defer client.Close()
+
+	result, err := client.SMembers(ctx, data.Key.ValueString()).Result()
 	if err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to SMEMBERS key %q: %s", data.Key.ValueString(), err))
 		return
@@ -167,6 +174,9 @@ func (r *SetResource) Update(ctx context.Context, req resource.UpdateRequest, re
 		return
 	}
 
+	client := r.providerCfg.clientFor(plan.Connection)
+	defer client.Close()
+
 	planSet := make(map[string]bool, len(planMembers))
 	for _, m := range planMembers {
 		planSet[m] = true
@@ -184,7 +194,7 @@ func (r *SetResource) Update(ctx context.Context, req resource.UpdateRequest, re
 		}
 	}
 	if len(toRemove) > 0 {
-		if err := r.client.SRem(ctx, plan.Key.ValueString(), toRemove...).Err(); err != nil {
+		if err := client.SRem(ctx, plan.Key.ValueString(), toRemove...).Err(); err != nil {
 			resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to SREM members from key %q: %s", plan.Key.ValueString(), err))
 			return
 		}
@@ -198,7 +208,7 @@ func (r *SetResource) Update(ctx context.Context, req resource.UpdateRequest, re
 		}
 	}
 	if len(toAdd) > 0 {
-		if err := r.client.SAdd(ctx, plan.Key.ValueString(), toAdd...).Err(); err != nil {
+		if err := client.SAdd(ctx, plan.Key.ValueString(), toAdd...).Err(); err != nil {
 			resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to SADD members to key %q: %s", plan.Key.ValueString(), err))
 			return
 		}
@@ -215,14 +225,21 @@ func (r *SetResource) Delete(ctx context.Context, req resource.DeleteRequest, re
 		return
 	}
 
-	if err := r.client.Del(ctx, data.Key.ValueString()).Err(); err != nil {
+	client := r.providerCfg.clientFor(data.Connection)
+	defer client.Close()
+
+	if err := client.Del(ctx, data.Key.ValueString()).Err(); err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to DEL key %q: %s", data.Key.ValueString(), err))
 	}
 }
 
 func (r *SetResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	key := req.ID
-	result, err := r.client.SMembers(ctx, key).Result()
+
+	client := r.providerCfg.clientFor(nil)
+	defer client.Close()
+
+	result, err := client.SMembers(ctx, key).Result()
 	if err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to SMEMBERS key %q: %s", key, err))
 		return

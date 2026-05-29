@@ -12,7 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9" // for redis.Nil
 )
 
 var _ resource.Resource = &StringResource{}
@@ -25,14 +25,15 @@ func NewStringResource() resource.Resource {
 
 // StringResource manages a Redis string key-value pair.
 type StringResource struct {
-	client *redis.Client
+	providerCfg *providerConfig
 }
 
 // StringResourceModel describes the resource data model.
 type StringResourceModel struct {
-	Key   types.String `tfsdk:"key"`
-	Value types.String `tfsdk:"value"`
-	ID    types.String `tfsdk:"id"`
+	Key        types.String             `tfsdk:"key"`
+	Value      types.String             `tfsdk:"value"`
+	ID         types.String             `tfsdk:"id"`
+	Connection *ConnectionOverrideModel `tfsdk:"redis_connection"`
 }
 
 func (r *StringResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -61,6 +62,7 @@ func (r *StringResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
+			"redis_connection": connectionBlock(),
 		},
 	}
 }
@@ -69,15 +71,15 @@ func (r *StringResource) Configure(_ context.Context, req resource.ConfigureRequ
 	if req.ProviderData == nil {
 		return
 	}
-	client, ok := req.ProviderData.(*redis.Client)
+	cfg, ok := req.ProviderData.(*providerConfig)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *redis.Client, got: %T. Please report this issue to the provider developers.", req.ProviderData),
+			fmt.Sprintf("Expected *providerConfig, got: %T. Please report this issue to the provider developers.", req.ProviderData),
 		)
 		return
 	}
-	r.client = client
+	r.providerCfg = cfg
 }
 
 func (r *StringResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -87,7 +89,10 @@ func (r *StringResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	if err := r.client.Set(ctx, data.Key.ValueString(), data.Value.ValueString(), 0).Err(); err != nil {
+	client := r.providerCfg.clientFor(data.Connection)
+	defer client.Close()
+
+	if err := client.Set(ctx, data.Key.ValueString(), data.Value.ValueString(), 0).Err(); err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to SET key %q: %s", data.Key.ValueString(), err))
 		return
 	}
@@ -103,7 +108,10 @@ func (r *StringResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 
-	val, err := r.client.Get(ctx, data.Key.ValueString()).Result()
+	client := r.providerCfg.clientFor(data.Connection)
+	defer client.Close()
+
+	val, err := client.Get(ctx, data.Key.ValueString()).Result()
 	if err == redis.Nil {
 		resp.State.RemoveResource(ctx)
 		return
@@ -124,7 +132,10 @@ func (r *StringResource) Update(ctx context.Context, req resource.UpdateRequest,
 		return
 	}
 
-	if err := r.client.Set(ctx, data.Key.ValueString(), data.Value.ValueString(), 0).Err(); err != nil {
+	client := r.providerCfg.clientFor(data.Connection)
+	defer client.Close()
+
+	if err := client.Set(ctx, data.Key.ValueString(), data.Value.ValueString(), 0).Err(); err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to SET key %q: %s", data.Key.ValueString(), err))
 		return
 	}
@@ -139,14 +150,21 @@ func (r *StringResource) Delete(ctx context.Context, req resource.DeleteRequest,
 		return
 	}
 
-	if err := r.client.Del(ctx, data.Key.ValueString()).Err(); err != nil {
+	client := r.providerCfg.clientFor(data.Connection)
+	defer client.Close()
+
+	if err := client.Del(ctx, data.Key.ValueString()).Err(); err != nil {
 		resp.Diagnostics.AddError("Redis Error", fmt.Sprintf("Unable to DEL key %q: %s", data.Key.ValueString(), err))
 	}
 }
 
 func (r *StringResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	key := req.ID
-	val, err := r.client.Get(ctx, key).Result()
+
+	client := r.providerCfg.clientFor(nil)
+	defer client.Close()
+
+	val, err := client.Get(ctx, key).Result()
 	if err == redis.Nil {
 		resp.Diagnostics.AddError("Not Found", fmt.Sprintf("Key %q does not exist in Redis.", key))
 		return

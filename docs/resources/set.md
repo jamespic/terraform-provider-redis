@@ -13,9 +13,21 @@ Manages a Redis set (`SADD`). On update, members removed from the configuration 
 ## Example Usage
 
 ```terraform
+# Minimal — uses all provider-level connection settings.
 resource "redis_set" "example" {
   key     = "article:1:tags"
   members = ["terraform", "redis", "infrastructure"]
+}
+
+# With a per-resource connection override.
+resource "redis_set" "other_instance" {
+  key     = "article:1:tags"
+  members = ["terraform"]
+
+  redis_connection {
+    addr     = "other-redis:6379"
+    password = "s3cr3t"
+  }
 }
 ```
 
@@ -27,9 +39,25 @@ resource "redis_set" "example" {
 - `key` (String) The Redis key.
 - `members` (Set of String) The set of string members to store.
 
+### Optional
+
+- `redis_connection` (Attributes) Per-resource connection settings (`redis_connection`). Each attribute is optional and overrides the matching provider-level setting for this resource only. If omitted, all provider-level settings are used. Changing this block to point at a different Redis server will not clean up the key on the original server — use `terraform import` to adopt existing keys. (see [below for nested schema](#nestedatt--redis_connection))
+
 ### Read-Only
 
 - `id` (String) The Redis key, used as the resource identifier.
+
+<a id="nestedatt--redis_connection"></a>
+### Nested Schema for `redis_connection`
+
+Optional:
+
+- `addr` (String) Redis server address in `host:port` form. Overrides the provider `addr`.
+- `db` (Number) Redis database index (0–15). Overrides the provider `db`.
+- `password` (String, Sensitive) Redis password. Overrides the provider `password`.
+- `tls` (Boolean) Enable TLS. Overrides the provider `tls`.
+- `tls_insecure_skip_verify` (Boolean) Disable TLS certificate verification. Overrides the provider `tls_insecure_skip_verify`. **Not recommended in production.**
+- `username` (String) Redis username. Overrides the provider `username`.
 
 ## Import
 

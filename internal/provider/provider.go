@@ -5,7 +5,6 @@ package provider
 
 import (
 	"context"
-	"crypto/tls"
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -13,7 +12,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/redis/go-redis/v9"
 )
 
 // Ensure RedisProvider satisfies the provider interface.
@@ -86,55 +84,42 @@ func (p *RedisProvider) Configure(ctx context.Context, req provider.ConfigureReq
 		return
 	}
 
-	addr := "localhost:6379"
+	cfg := &providerConfig{}
+
+	cfg.addr = "localhost:6379"
 	if v := os.Getenv("REDIS_ADDR"); v != "" {
-		addr = v
+		cfg.addr = v
 	}
 	if !data.Addr.IsNull() && !data.Addr.IsUnknown() {
-		addr = data.Addr.ValueString()
+		cfg.addr = data.Addr.ValueString()
 	}
 
-	password := os.Getenv("REDIS_PASSWORD")
+	cfg.password = os.Getenv("REDIS_PASSWORD")
 	if !data.Password.IsNull() && !data.Password.IsUnknown() {
-		password = data.Password.ValueString()
+		cfg.password = data.Password.ValueString()
 	}
 
-	username := os.Getenv("REDIS_USERNAME")
+	cfg.username = os.Getenv("REDIS_USERNAME")
 	if !data.Username.IsNull() && !data.Username.IsUnknown() {
-		username = data.Username.ValueString()
+		cfg.username = data.Username.ValueString()
 	}
 
-	db := 0
 	if !data.DB.IsNull() && !data.DB.IsUnknown() {
-		db = int(data.DB.ValueInt64())
+		cfg.db = int(data.DB.ValueInt64())
 	}
 
-	useTLS := os.Getenv("REDIS_TLS") == "true"
+	cfg.tls = os.Getenv("REDIS_TLS") == "true"
 	if !data.TLS.IsNull() && !data.TLS.IsUnknown() {
-		useTLS = data.TLS.ValueBool()
+		cfg.tls = data.TLS.ValueBool()
 	}
 
-	skipVerify := os.Getenv("REDIS_TLS_INSECURE_SKIP_VERIFY") == "true"
+	cfg.tlsInsecureSkipVerify = os.Getenv("REDIS_TLS_INSECURE_SKIP_VERIFY") == "true"
 	if !data.TLSInsecureSkipVerify.IsNull() && !data.TLSInsecureSkipVerify.IsUnknown() {
-		skipVerify = data.TLSInsecureSkipVerify.ValueBool()
+		cfg.tlsInsecureSkipVerify = data.TLSInsecureSkipVerify.ValueBool()
 	}
 
-	opts := &redis.Options{
-		Addr:     addr,
-		Password: password,
-		Username: username,
-		DB:       db,
-	}
-
-	if useTLS {
-		opts.TLSConfig = &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: skipVerify, //nolint:gosec // controlled by explicit provider option
-		}
-	}
-
-	resp.DataSourceData = redis.NewClient(opts)
-	resp.ResourceData = redis.NewClient(opts)
+	resp.DataSourceData = cfg
+	resp.ResourceData = cfg
 }
 
 func (p *RedisProvider) Resources(_ context.Context) []func() resource.Resource {
